@@ -1,7 +1,7 @@
 #' @title Continuous time Generalized Rapid response CUSUM (CGR-CUSUM)
 #'
 #' @description This function performs the CGR-CUSUM procedure
-#' described in Gomon et al. (in review). For detection purposes, it suffices
+#' described in Gomon et al. (2022 - preprint). For detection purposes, it suffices
 #' to determine the value of the chart at the times of failure. This can be
 #'  achieved by leaving \code{ctimes} unspecified.
 #' The function has two vital parameters, at least one of which must be specified:
@@ -14,6 +14,10 @@
 #' will be performed}
 #' }
 #'
+#' @references Gomon, D. and Putter, H. and Nelissen, R. G. H. H. and van der Pas, S. (2022),
+#' CGR-CUSUM: A Continuous time Generalized Rapid Response Cumulative Sum chart, arXiv - preprint.
+#' \doi{10.48550/ARXIV.2205.07618}
+#'
 #' @details The CGR-CUSUM can be used to test for a change of unknown positive fixed size \eqn{\theta}{\theta}
 #'  in the subject-specific hazard rate from \eqn{h_i(t)}{h_i(t)} to \eqn{h_i(t) e^\theta}{h_i(t) exp(\theta)}
 #'  starting from some unknown subject \eqn{\nu}{\nu}. The starting time of the first subject
@@ -25,6 +29,15 @@
 #' with \eqn{N_i(t)}{N_i(t)} the counting process for the failure at time \eqn{t}{t} of subject \eqn{i}{i}
 #' and \deqn{\Lambda_{\geq \nu}(t) = \sum_{i \geq \nu} \Lambda_i(t),}{\Lambda_{>=\nu}(t) = \sum_{i>=\nu}\Lambda_i(t),}
 #' where \eqn{\Lambda_i(t)}{\Lambda_i(t)} is the cumulative intensity of subject \eqn{i}{i} at time \eqn{t}{t}.
+#'
+#' When \code{maxtheta} is specified, the maximum likelihood estimate of \eqn{\theta}{\theta}
+#' is restricted to either \code{abs(maxtheta)} (upper sided CGR-CUSUM) or
+#' \code{-abs(maxtheta)} (lower sided CGR-CUSUM). Choosing this value smaller leads to smaller
+#' control limits and therefore quicker detection times, but can cause delays in
+#' detection if the true increase in failure rate is larger than the cut-off. The
+#' default of expecting at most a 6 times increase in hazard/odds ratio can therefore
+#' be the wrong choice for your intended application area. If unsure, the most conservative
+#' choice is to take \code{maxtheta = Inf}.
 #'
 #' @param data A \code{data.frame} with rows representing subjects and the
 #' following named columns: \describe{
@@ -87,8 +100,11 @@
 #' failure rate, while lower CUSUMs can be used to monitor for a decrease in the
 #' failure rate.
 #' @param assist (optional): Output of the function \code{\link[success:parameter_assist]{parameter_assist()}}
-#' @param maxtheta (optional): Maximum value of maximum likelihood estimate for
-#' parameter \eqn{\theta}{\theta}. Default is \code{Inf}.
+#' @param maxtheta (optional): Maximum value the maximum likelihood estimate for
+#' parameter \eqn{\theta}{\theta} can take. If \code{detection = "lower"}, \code{-abs(theta)}
+#' will be the minimum value the maximum likelihood estimate for
+#' parameter \eqn{\theta}{\theta} can take.  Default is \code{log(6)}, meaning that
+#' at most a 6 times increase/decrease in the odds/hazard ratio is expected.
 #'
 #' @return An object of class "cgrcusum" containing:
 #' \itemize{
@@ -150,7 +166,7 @@
 cgr_cusum <- function(data, coxphmod, cbaseh, ctimes, h, stoptime,
                      C, pb = FALSE, ncores = 1, cmethod = "memory",
                      dependencies, detection = "upper", assist,
-                     maxtheta = Inf){
+                     maxtheta = log(6)){
 
   if(!missing(assist)){
     list2env(assist, envir = environment())
@@ -177,6 +193,11 @@ cgr_cusum <- function(data, coxphmod, cbaseh, ctimes, h, stoptime,
   # determine the default construction times (all failtimes), if none specified
   if(missing(ctimes)){
     ctimes <- union(min(data$entrytime), unique(data$otime))
+  } else{
+    ctimes <- union(ctimes, unique(data$otime[which(data$otime <= max(ctimes) & data$otime >= min(ctimes))]))
+  }
+  if(max(ctimes) <= min(data$entrytime)){
+    stop("Cannot construct chart before subjects enter into study (max(ctimes) <= min(data$entrytime)). Please re-asses the argument 'ctimes'.")
   }
   if(missing(stoptime)){
     stoptime <- max(data$otime[is.finite(data$otime)])
@@ -210,11 +231,23 @@ cgr_cusum <- function(data, coxphmod, cbaseh, ctimes, h, stoptime,
       stop("Please specify only 1 control limit.")
     }
   }
+  if(!missing(maxtheta)){
+    if(maxtheta < 0){
+      stop("Parameter 'maxtheta' must be larger than 0.
+      Expect at most a doubling (exp(theta) = 2) of cumulative hazard? theta = log(2)
+      Expect at most a halving (exp(theta) = 0.5) of cumulative hazard rate? theta = log(2) and detection = 'lower'")
+    }
+  }
 
   #----------------------------FUNCTION BODY--------------------------#
 
   #Only determine value of the chart at at relevant times
   ctimes <- sort(ctimes[which(ctimes <= stoptime)])
+
+  #Sort data according to entrytime for easier subsetting.
+  data <- data[order(data$entrytime, data$otime),]
+
+
   #When determining CGR-CUSUM at only 1 time point, cmethod = "memory" doesnt work
   #if(length(ctimes) == 1){
   #  cmethod = "CPU"
@@ -241,6 +274,7 @@ cgr_cusum <- function(data, coxphmod, cbaseh, ctimes, h, stoptime,
       Gt <- rbind(Gt, c(ctimes[j], temcgr$val, exp(temcgr$theta), temcgr$starttime))
       if (!missing(h)){if(temcgr$val >= h) {stopind = TRUE; break}}
     }
+    Gt <- as.data.frame(Gt)
     colnames(Gt) <- c("time", "value", "exp_theta_t", "S_nu")
     if(pb){
       close(pb2)

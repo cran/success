@@ -6,7 +6,7 @@
 \usage{
 cgr_cusum(data, coxphmod, cbaseh, ctimes, h, stoptime, C, pb = FALSE,
   ncores = 1, cmethod = "memory", dependencies, detection = "upper",
-  assist, maxtheta = Inf)
+  assist, maxtheta = log(6))
 }
 \arguments{
 \item{data}{A \code{data.frame} with rows representing subjects and the
@@ -77,8 +77,11 @@ failure rate.}
 
 \item{assist}{(optional): Output of the function \code{\link[success:parameter_assist]{parameter_assist()}}}
 
-\item{maxtheta}{(optional): Maximum value of maximum likelihood estimate for
-parameter \eqn{\theta}{\theta}. Default is \code{Inf}.}
+\item{maxtheta}{(optional): Maximum value the maximum likelihood estimate for
+parameter \eqn{\theta}{\theta} can take. If \code{detection = "lower"}, \code{-abs(theta)}
+will be the minimum value the maximum likelihood estimate for
+parameter \eqn{\theta}{\theta} can take.  Default is \code{log(6)}, meaning that
+at most a 6 times increase/decrease in the odds/hazard ratio is expected.}
 }
 \value{
 An object of class "cgrcusum" containing:
@@ -98,7 +101,7 @@ the control limit;
 }
 \description{
 This function performs the CGR-CUSUM procedure
-described in Gomon et al. (in review). For detection purposes, it suffices
+described in Gomon et al. (2022 - preprint). For detection purposes, it suffices
 to determine the value of the chart at the times of failure. This can be
 achieved by leaving \code{ctimes} unspecified.
 The function has two vital parameters, at least one of which must be specified:
@@ -123,6 +126,15 @@ where  \deqn{N(\geq \nu)(t) = \sum_{i \geq \nu} N_i(t),}{N_{>=\nu}(t) = \sum_{i>
 with \eqn{N_i(t)}{N_i(t)} the counting process for the failure at time \eqn{t}{t} of subject \eqn{i}{i}
 and \deqn{\Lambda_{\geq \nu}(t) = \sum_{i \geq \nu} \Lambda_i(t),}{\Lambda_{>=\nu}(t) = \sum_{i>=\nu}\Lambda_i(t),}
 where \eqn{\Lambda_i(t)}{\Lambda_i(t)} is the cumulative intensity of subject \eqn{i}{i} at time \eqn{t}{t}.
+
+When \code{maxtheta} is specified, the maximum likelihood estimate of \eqn{\theta}{\theta}
+is restricted to either \code{abs(maxtheta)} (upper sided CGR-CUSUM) or
+\code{-abs(maxtheta)} (lower sided CGR-CUSUM). Choosing this value smaller leads to smaller
+control limits and therefore quicker detection times, but can cause delays in
+detection if the true increase in failure rate is larger than the cut-off. The
+default of expecting at most a 6 times increase in hazard/odds ratio can therefore
+be the wrong choice for your intended application area. If unsure, the most conservative
+choice is to take \code{maxtheta = Inf}.
 }
 \examples{
 require(survival)
@@ -149,6 +161,11 @@ cgr_cox <- cgr_cusum(data = tdat, coxphmod = tcoxmod, pb = TRUE)
 #plot the CGR-CUSUM (estimated hazard from coxph)
 plot(cgr_cox)
 }
+}
+\references{
+Gomon, D. and Putter, H. and Nelissen, R. G. H. H. and van der Pas, S. (2022),
+CGR-CUSUM: A Continuous time Generalized Rapid Response Cumulative Sum chart, arXiv - preprint.
+\doi{10.48550/ARXIV.2205.07618}
 }
 \seealso{
 \code{\link[success]{plot.cgrcusum}}, \code{\link[success]{runlength.cgrcusum}}

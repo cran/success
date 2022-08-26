@@ -33,6 +33,7 @@
 #' @importFrom pbapply pbapply
 #' @importFrom parallel clusterExport
 #' @importFrom pbapply pboptions
+#' @importFrom Rfast binary_search
 #'
 #' @noRd
 #' @keywords internal
@@ -79,6 +80,13 @@ cgr_helper_mat <- function(data, ctimes, h, coxphmod, cbaseh, ncores, displaypb 
   # contribution by summing over the column at the desired ctime.
   # The number of failures at that timepoint is determined the same way
   ctimes <- ctimes[which(ctimes >= min(data$entrytime))]
+
+  data_mat <- as.matrix(data[, c("censorid", "entrytime", "otime")])
+  data_mat[, "entrytime"] <- as.double(data_mat[, "entrytime"])
+  if (!identical(FALSE, is.unsorted(data_mat[, "entrytime"]))){
+    stop("'data$entrytime' must be sorted non-decreasingly and not contain NAs.")
+  }
+
 
   #Remove R check warnings
   entrytime <- NULL
@@ -151,7 +159,7 @@ cgr_helper_mat <- function(data, ctimes, h, coxphmod, cbaseh, ncores, displaypb 
 
 
   #Determine times from which to construct the CGR
-  helperstimes <- sort(unique(data$entrytime))
+  helperstimes <- as.double(sort(unique(data$entrytime)))
   #THIS DOESNT WORK YET WHEN YOU HAVE INSTANT FAILURES
   #BECAUSE THEN YOU CANT DETERMINE THETA - INSTANT FAILURE -> theta = Inf, so
   #you ignore instant failure and instead look at previous closest failure time
@@ -178,30 +186,69 @@ cgr_helper_mat <- function(data, ctimes, h, coxphmod, cbaseh, ncores, displaypb 
   #Function used for maximizing over starting points (patients with starting time >= k)
   maxoverk <- function(helperstime, ctime, ctimes, data, lambdamat, maxtheta){
     #Determine part of data that is active at required times
-    matsub <- which(data$entrytime >= helperstime & data$entrytime <= ctime)
+    lower <- binary_search(data[, "entrytime"], helperstime, index = TRUE)
+    upper <- nrow(data) - binary_search(rev(-1*data[, "entrytime"]), (-1*ctime), index = TRUE) +1
+
+    ########This part of the code can be improved to reduce comp time#######
+    #This code works because data is sorted according to entrytime and then otime
+    #We use findInterval instead of match or which because it's faster
+    #lower <- .Internal(findInterval(data[, "entrytime"], helperstime, rightmost.closed = FALSE,
+    #                                all.inside = FALSE, left.open = TRUE)) + 1
+    #upper <- .Internal(findInterval(data[, "entrytime"], ctime, rightmost.closed = FALSE,
+    #                                all.inside = FALSE, left.open = FALSE))
+    ########This part of the code can be improved to reduce comp time#######
+    #findInterval is faster than binary_search, but we may not use
+    #.Internal functions in R packages
+    #If we remove .Internal, then an is.sorted() check is executed every time,
+    #greatly increasing the required computation time.
+
+    matsub <- lower:upper
+    #Above code used to be:
+    #matsub <- which(data[, "entrytime"] >= helperstime & data[, "entrytime"] <= ctime)
+    #This was slow, so use Rfast functions instead, .Internal functions a bit faster, rewrite in Rcpp in future.
+
     #The cumulative intensity at that time is the column sum of the specified ctime
-    AT <- sum(lambdamat[matsub, which(ctimes == ctime)])
-    #THIS COULD BE SLOW, OTHERWISE ASSIGN TDAT <- subset(data, matsub)
-    #Determine amount of failures at ctime.
-    NDT <- length(which(data[matsub, ]$censorid == 1 & data[matsub,]$otime <= ctime))
+    AT <- sum(lambdamat[matsub, match(ctime, ctimes)])
+
+    #Subset only the part of data where patients arriving after helperstime and having
+    #otime before ctime are considered
+    tmat <- data[matsub, , drop = FALSE]
+
+    #Determine amount of failures before and at ctime.
+    #Maybe do sum( < ctimes) and sum( == ctime) and then calculate NDT <- sum(both)
+    NDT <- sum(tmat[, "censorid"] == 1 & tmat[, "otime"] <= ctime)
+    NDT_current <- sum(tmat[, "censorid"] == 1 & tmat[, "otime"] == ctime)
+
+    #Old and slow version:
+    #NDT <- length(which(data[matsub, ]$censorid == 1 & data[matsub,]$otime <= ctime))
+    #NDT_current <- length(which(data[matsub, ]$censorid == 1 & data[matsub, ]$otime == ctime))
+
     #Determine MLE of theta
     thetat <- log(NDT/AT)
+    thetat_down <- log((NDT-NDT_current)/AT)
     if (is.finite(thetat)){
-      thetat <- min(max(0, thetat), maxtheta)
+      thetat <- min(max(0, thetat), abs(maxtheta))
     } else {thetat <- 0}
+    if (is.finite(thetat_down)){
+      thetat_down <- min(max(0, thetat_down), abs(maxtheta))
+    } else {thetat_down <- 0}
     #Determine value of CGI-CUSUM using only patients with S_i > helperstimes[i]
     CGIvalue <- thetat* NDT - (exp(thetat)- 1) * AT
+    CGI_down <- thetat_down * (NDT - NDT_current) - (exp(thetat_down)- 1) * AT
     #Return both the value of CGI and the MLE (to be used later)
-    return(c(CGIvalue, thetat))
+    return(c(CGIvalue, CGI_down, thetat, thetat_down))
   }
 
   #Function to calculate CGR value at one ctime by ways of maximizing over all CGI(t) values.
   #Achieved by applying the maxoverk function and determining maxima.
   maxoverj <- function(y){
-    #For when I fix helperfailtimes problem.
+    #Determine which helperstimes to use in this iteration.
     temphelperstimes <- helperstimes[which(helperstimes <= y & helperfailtimes <= y)]
+    #Problem is that temphelperstimes is sometimes empty (integer(0)), which
+    #causes .findInterval in maxoverk to not work.
     a <- sapply(temphelperstimes,
-                function(x) maxoverk(helperstime = x,  ctime = y, ctimes = ctimes, data = data,
+                function(x) maxoverk(helperstime = x,  ctime = y, ctimes = ctimes,
+                                     data = data_mat,
                                      lambdamat = lambdamat, maxtheta = maxtheta))
     #We first apply the maxoverk function to determine CGI values
     #starting from all relevant helper S_i times (patient entry times)
@@ -210,15 +257,20 @@ cgr_helper_mat <- function(data, ctimes, h, coxphmod, cbaseh, ncores, displaypb 
     #            function(x) maxoverk(helperstime = x,  ctime = y, ctimes = ctimes, data = data, lambdamat = lambdamat))
     #If there are no values to be calculated, return trivial values
     if(length(a) == 0){
-      return(c(0,0,1))
+      return(c(0,0,0,0,1,1))
     }else{
       #First row is value of chart, second row associated value of theta
       #Determine which entry is the largest (largest CGI value)
       tidmax <- which.max(a[1,])
+      #Determine which entry is largest when not considering current failures.
+      tidmin <- which.max(a[2,])
       #Determine the corresponding value of CGI(t)
-      atemp <- a[,tidmax]
+      atemp <- a[, tidmax]
+      #And the corresponding lower value of CGI(t)
+      atemp_down <- a[, tidmin]
       #Returns c(chartval, thetaval, maxindex) at maximum of CGI(t)
-      return(c(atemp, temphelperstimes[tidmax]))
+      #More specific: CGI_up, CGI_down, theta_up, theta_down, idx_up, idx_down (see maxoverk())
+      return(c(atemp[1], atemp_down[2], atemp[3], atemp_down[4], temphelperstimes[tidmax], temphelperstimes[tidmin]))
     }
   }
 
@@ -230,26 +282,32 @@ cgr_helper_mat <- function(data, ctimes, h, coxphmod, cbaseh, ncores, displaypb 
     #For when I fix helperfailtimes problem.
     temphelperstimes <- helperstimes[which(helperstimes <= y & helperfailtimes <= y)]
     a <- sapply(temphelperstimes,
-                function(x) maxoverk(helperstime = x,  ctime = y, ctimes = ctimes, data = data,
+                function(x) maxoverk(helperstime = x,  ctime = y, ctimes = ctimes,
+                                     data = data_mat,
                                      lambdamat = lambdamat, maxtheta = maxtheta))
     #a <- sapply(helperstimes[which(helperstimes <= y)],
     #            function(x) maxoverk(helperstime = x,  ctime = y, ctimes = ctimes, data = data, lambdamat = lambdamat))
 
     if(length(a) == 0){
-      return(c(0,0,1))
+      return(c(0,0,0,0,1,1))
     }else{
       #First row is value of chart, second row associated value of theta
       #Determine which entry is the largest (largest CGI value)
       tidmax <- which.max(a[1,])
+      #Determine which entry is largest when not considering current failures.
+      tidmin <- which.max(a[2,])
       #Determine the corresponding value of CGI(t)
       atemp <- a[,tidmax]
+      #And the corresponding lower value of CGI(t)
+      atemp_down <- a[, tidmin]
       if(abs(atemp[1]) >= abs(h)){
         hcheck <<- TRUE
         stopind <<- TRUE
         stopctime <<- match(y, ctimes)
       }
       #Returns c(chartval, thetaval) at maximum of CGI(t)
-      return(c(atemp, temphelperstimes[tidmax]))
+      #More specific: CGI_up, CGI_down, theta_up, theta_down, idx_up, idx_down (see maxoverk())
+      return(c(atemp[1], atemp_down[2], atemp[3], atemp_down[4], temphelperstimes[tidmax], temphelperstimes[tidmin]))
     }
   }
 
@@ -269,28 +327,45 @@ cgr_helper_mat <- function(data, ctimes, h, coxphmod, cbaseh, ncores, displaypb 
       stopCluster(cl)
       cl <- NULL
     }
-    fin <- pbsapply(ctimes, function(x){ if(isFALSE(hcheck)){ maxoverj_h(x, h = h)} else{return(c(0,0,1))}}, cl = cl)
+    fin <- pbsapply(ctimes, function(x){ if(isFALSE(hcheck)){ maxoverj_h(x, h = h)} else{return(c(0,0,0,0,1,1))}}, cl = cl)
   } else{
     fin <- pbsapply(ctimes, maxoverj, cl = cl)
     if(ncores > 1){
       stopCluster(cl)
     }
   }
-  Gt <- as.data.frame(t(fin))
+  Gt <- t(fin)
   if(!is.na(stopctime)){
     Gt <- Gt[1:stopctime,]
   }
-  Gt[,2] <- exp(Gt[,2])
+  Gt[,3] <- exp(Gt[,3])
+  Gt[,4] <- exp(Gt[,4])
   #No longer necessary, provide start time directly
-  #Gt[,3] <- helperstimes[Gt[,3]]
+  #Gt[,5] <- helperstimes[Gt[,5]]
+  #Gt[,6] <- helperstimes[Gt[,6]]
   if(!is.na(stopctime)){
     Gt <- cbind(ctimes[1:stopctime], Gt)
   } else{
     Gt <- cbind(ctimes, Gt)
   }
-  Gt <- rbind(c(min(data$entrytime), 0, 1, 0),Gt)
-  colnames(Gt) <- c("time", "value", "exp_theta_t", "S_nu")
+  Gt <- unname(Gt)
+
+  #Initiate final matrix
+  Gt_final <- matrix(c(min(ctimes, min(data$entrytime)), 0, 1, 0), ncol = 4)
+  for(l in 1:nrow(Gt)){
+    if(Gt[l, 2] == Gt[l,3]){
+      Gt_final <- rbind(Gt_final, Gt[l, c(1, 2, 4, 6)])
+    } else{
+      Gt_final <- rbind(Gt_final, Gt[l, c(1, 3, 5, 7)])
+      Gt_final <- rbind(Gt_final, Gt[l, c(1, 2, 4, 6)])
+    }
+  }
+  Gt_final <- as.data.frame(Gt_final)
+
+  colnames(Gt_final) <- c("time", "value", "exp_theta_t", "S_nu")
+
+
 
   #return list of relevant values
-  return(Gt)
+  return(Gt_final)
 }

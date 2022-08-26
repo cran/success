@@ -128,10 +128,11 @@ bk_cusum <- function(data, theta, coxphmod, cbaseh, ctimes, h, stoptime,
     data[tempidx,]$censorid <- rep(length(tempidx), 0)
   }
   # determine the default construction times (all failtimes + entrytimes), if none specified
+  #NOTE: WE NEED BOTH FAILTIMES AND ENTRYTIME, OTHERWISE THE VALUES MIGHT BE WRONG!!!
   if(missing(ctimes)){
     ctimes <- union(unique(data$otime), unique(data$entrytime))
   } else{
-    ctimes <- union(ctimes, unique(data$otime[which(data$otime <= max(ctimes))]))
+    ctimes <- union(ctimes, union(unique(data$entrytime[which(data$entrytime <= max(ctimes))]), unique(data$otime[which(data$otime <= max(ctimes))])))
   }
   ctimes <- sort(ctimes)
   if(missing(stoptime)){
@@ -164,10 +165,27 @@ bk_cusum <- function(data, theta, coxphmod, cbaseh, ctimes, h, stoptime,
     stop("Please specify a value for theta (ln(expected hazard ratio)).")
   }
 
-
-  #---------------------------FUNCTION BODY---------------------------#
   #Determine and sort the times at which to construct the chart
   ctimes <- sort(ctimes[which(ctimes <= stoptime)])
+
+
+  #---------------------------FUNCTION BODY---------------------------#
+
+  #How is the BK-CUSUM constructed?
+  #First we calculate the value of the BK-CUSUM at first specified ctime
+  #Afterwards, we calculate the increments dUt (see Biswas & Kalbfleisch (2008))
+  #to calculate the value at each following ctime.
+  #The problem with this is that between each 2 ctimes, we need to redetermine
+  #which patients provide an active contribution to the chart.
+  #Due to how the chart is constructed,
+  #we require to have all patient entry and failure times to be included in ctimes.
+
+  #A different way would be to consider the active cbaseh contribution between the ctimes separately.
+  #Maybe for a future implementation?
+  #Not a priority - BK-CUSUM is not computationally expensive.
+
+
+
   #If twosided chart is required, determine the chart in two directions
   if(twosided == TRUE){
     Gt <- matrix(0, nrow =0, ncol = 3)
@@ -177,6 +195,8 @@ bk_cusum <- function(data, theta, coxphmod, cbaseh, ctimes, h, stoptime,
     } else if(!missing(h) && length(h) == 2){
       if(!all(sign(sort(h)) == c(-1, 1))){
         stop("When specifying 2 control limits the two values should have reverse signs.")
+      } else{
+        h <- sort(h)
       }
     } else if(!missing(h) && length(h) > 2){
       stop("Please provide 1 or 2 values for the control limit.")
@@ -203,6 +223,10 @@ bk_cusum <- function(data, theta, coxphmod, cbaseh, ctimes, h, stoptime,
   }
   #Calculate subject specific risk
   riskdat <- calc_risk(data = data, coxphmod = coxphmod)
+
+  #Keep track with index:
+  j_temp <- 0
+
   #Calculate value at each of the required times
   for(j in seq_along(ctimes)){
     if(pb){
@@ -238,22 +262,45 @@ bk_cusum <- function(data, theta, coxphmod, cbaseh, ctimes, h, stoptime,
         #For lower, we first add the Cumulative intensity dAT,
         #then we substract the failures.
         if(theta >= 0){
-          newval <- max(0, 0 - (exp(theta) -1) * dAT)
-          newval <- newval + theta*dNDT
-          Gt <- rbind(Gt, c(ctimes[j], newval))
+          newval_down <- max(0, 0 - (exp(theta) -1) * dAT)
+          newval_up <- newval_down + theta*dNDT
+          if(newval_down == newval_up){
+            Gt <- rbind(Gt, c(ctimes[j], newval_up))
+            j_temp <- j_temp + 1
+          } else{
+            Gt <- rbind(Gt, c(ctimes[j], newval_down))
+            Gt <- rbind(Gt, c(ctimes[j], newval_up))
+            j_temp <- j_temp + 2
+          }
+
         } else if(theta < 0){
-          newval <- 0 + (exp(theta)-1)* dAT
-          newval <- newval - theta*dNDT
-          newval <- min(0, newval)
-          Gt <- rbind(Gt, c(ctimes[j], newval))
+          newval_down <- 0 + (exp(theta)-1)* dAT
+          newval_up <- newval_down - theta*dNDT
+          newval_up <- min(0, newval_up)
+
+          if(newval_down == newval_up){
+            Gt <- rbind(Gt, c(ctimes[j], newval_down))
+            j_temp <- j_temp + 1
+          } else{
+            Gt <- rbind(Gt, c(ctimes[j], newval_down))
+            Gt <- rbind(Gt, c(ctimes[j], newval_up))
+            j_temp <- j_temp + 2
+          }
         }
-      } else if(twosided == TRUE){
-        newvalup <- max(0, 0 - (exp(theta[2])-1)* dAT)
-        newvalup <- newvalup + theta[2]*dNDT
-        newvaldown <- 0 + (exp(theta[1])-1)* dAT
-        newvaldown <- newvaldown - theta[1]*dNDT
-        newvaldown <- min(0, newvaldown)
-        Gt <- rbind(Gt, c(ctimes[j], newvalup, newvaldown))
+      } else if(twosided == TRUE){ #Twosided BK-CUSUM
+        newvalupper_down <- max(0, 0 - (exp(theta[2])-1)* dAT)
+        newvalupper_up <- newvalupper_down + theta[2]*dNDT
+        newvallower_down <- 0 + (exp(theta[1])-1)* dAT
+        newvallower_up <- newvallower_down - theta[1]*dNDT
+        newvallower_up <- min(0, newvallower_up)
+        if((newvalupper_down == newvalupper_up) & (newvallower_down == newvallower_up)){
+          Gt <- rbind(Gt, c(ctimes[j], newvalupper_up, newvallower_down))
+          j_temp <- j_temp + 1
+        } else{
+          Gt <- rbind(Gt, c(ctimes[j], newvalupper_down, newvallower_down))
+          Gt <- rbind(Gt, c(ctimes[j], newvalupper_up, newvallower_up))
+          j_temp <- j_temp + 2
+        }
       }
     } else{
       #Determine dUt from ctimes[j-1] to ctimes[j]
@@ -278,33 +325,54 @@ bk_cusum <- function(data, theta, coxphmod, cbaseh, ctimes, h, stoptime,
       #Determine cusum value and rbind to previous values
       if(twosided == FALSE){
         if(theta >= 0){
-          newval <- max(0, Gt[j-1,2] - (exp(theta)-1)* dAT)
-          newval <- newval + theta*dNDT
-          Gt <- rbind(Gt, c(ctimes[j], newval))
+          newval_down <- max(0, Gt[j_temp,2] - (exp(theta)-1)* dAT)
+          newval_up <- newval_down + theta*dNDT
+          if(newval_down == newval_up){
+            Gt <- rbind(Gt, c(ctimes[j], newval_up))
+            j_temp <- j_temp + 1
+          } else{
+            Gt <- rbind(Gt, c(ctimes[j], newval_down))
+            Gt <- rbind(Gt, c(ctimes[j], newval_up))
+            j_temp <- j_temp + 2
+          }
         } else if(theta < 0){
-          newval <- Gt[j-1,2] + (exp(theta)-1)* dAT
-          newval <- newval - theta*dNDT
-          newval <- min(0, newval)
-          Gt <- rbind(Gt, c(ctimes[j], newval))
+          newval_down <- Gt[j_temp,2] + (exp(theta)-1)* dAT
+          newval_up <- newval_down - theta*dNDT
+          newval_up <- min(0, newval_up)
+          if(newval_down == newval_up){
+            Gt <- rbind(Gt, c(ctimes[j], newval_down))
+            j_temp <- j_temp + 1
+          } else{
+            Gt <- rbind(Gt, c(ctimes[j], newval_down))
+            Gt <- rbind(Gt, c(ctimes[j], newval_up))
+            j_temp <- j_temp + 2
+          }
         }
       } else if(twosided == TRUE){
-        newvalup <- max(0, Gt[j-1,2] - (exp(theta[2])-1)* dAT)
-        newvalup <- newvalup + theta[2]*dNDT
-        newvaldown <- Gt[j-1,3] + (exp(theta[1])-1)* dAT
-        newvaldown <- newvaldown - theta[1]*dNDT
-        newvaldown <- min(0, newvaldown)
-        Gt <- rbind(Gt, c(ctimes[j], newvalup, newvaldown))
+        newvalupper_down <- max(0, Gt[j_temp,2] - (exp(theta[2])-1)* dAT)
+        newvalupper_up <- newvalupper_down + theta[2]*dNDT
+        newvallower_down <- Gt[j_temp,3] + (exp(theta[1])-1)* dAT
+        newvallower_up <- newvallower_down - theta[1]*dNDT
+        newvallower_up <- min(0, newvallower_up)
+        if((newvalupper_down == newvalupper_up) & (newvallower_down == newvallower_up)){
+          Gt <- rbind(Gt, c(ctimes[j], newvalupper_up, newvallower_down))
+          j_temp <- j_temp + 1
+        } else{
+          Gt <- rbind(Gt, c(ctimes[j], newvalupper_down, newvallower_down))
+          Gt <- rbind(Gt, c(ctimes[j], newvalupper_up, newvallower_up))
+          j_temp <- j_temp + 2
+        }
       }
     }
     if (!missing(h)){
       if(twosided == TRUE){
         if(length(h) == 2){
-          if( (Gt[j,2] >= h[2]) | (Gt[j,3] <= h[1]) ) {stopind = TRUE; break}
+          if( (Gt[j_temp,2] >= h[2]) | (Gt[j_temp-1,3] <= h[1]) ) {stopind = TRUE; break}
         } else if(length(h) == 1){
-          if( (abs(Gt[j,2]) >= abs(h)) | (abs(Gt[j,3]) >= abs(h)) ) {stopind = TRUE; break}
+          if( (abs(Gt[j_temp,2]) >= abs(h)) | (abs(Gt[j_temp-1,3]) >= abs(h)) ) {stopind = TRUE; break}
         }
       } else{
-        if( abs(Gt[j,2]) >= abs(h) ) {stopind = TRUE; break}
+        if( abs(Gt[j_temp,2]) >= abs(h) ) {stopind = TRUE; break}
       }
     }
   }
