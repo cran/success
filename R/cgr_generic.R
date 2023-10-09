@@ -8,6 +8,11 @@
 #' @param x Chart to plot
 #' @param h Control limit to display for \code{cgrcusum}, \code{bkcusum} or \code{bercusum}
 #' @param percentage Should output be shown in percentages? Default is \code{TRUE}.
+#' @param unit_label Should unit labels be displayed next to detected units in the funnel plot?
+#' Default is \code{TRUE}.
+#' @param label_size Size of the labels when \code{unit_label} is \code{TRUE}. Default is 3.
+#' @param col_fill Single fill colour for the prediction intervals in the funnel plot.
+#' In any format that \code{\link[grDevices]{col2rgb}} accepts. Default is \code{"blue"}.
 #' @param ... Further plotting parameters
 #'
 #'
@@ -16,9 +21,8 @@
 #' @seealso \code{\link[success]{cgr_cusum}}, \code{\link[success]{bk_cusum}}, \code{\link[success]{bernoulli_cusum}}, \code{\link[success]{funnel_plot}}
 #'
 #' @returns A plot of the associated chart is displayed in the current graphics device.
-#'
+#' @importFrom ggplot2 ggplot aes geom_line geom_hline labs
 #' @describeIn plot Plot a CGR-CUSUM
-#' @import ggplot2
 #' @export
 plot.cgrcusum <- function(x, h, ...){
   time <- value <- NULL
@@ -35,7 +39,6 @@ plot.cgrcusum <- function(x, h, ...){
 }
 
 #' @describeIn plot Plot a BK-CUSUM
-#' @import ggplot2
 #' @export
 plot.bkcusum <- function(x, h, ...){
   time <- value <- val_up <- val_down <- NULL
@@ -67,14 +70,16 @@ plot.bkcusum <- function(x, h, ...){
 
 
 #' @describeIn plot Display a funnel plot
-#' @import ggplot2
-#' @importFrom grDevices palette
-#' @importFrom grDevices palette.colors
+#' @importFrom ggplot2 scale_colour_manual geom_point ylim scale_fill_manual geom_ribbon
+#' @importFrom ggrepel geom_label_repel
+#' @importFrom stats relevel
+#' @importFrom grDevices palette palette.colors colorRamp adjustcolor
 #' @export
-plot.funnelplot <- function(x, percentage = TRUE, ...){
-  numtotal <- lower <- conflev <- upper <- p <- unit <- detection <- NULL
+plot.funnelplot <- function(x, percentage = TRUE, unit_label = TRUE,
+                            label_size = 3, col_fill = "blue", ...){
+  numtotal <- lower <- predlim <- upper <- p <- unit <- detection <- NULL
 
-  #Supply plot.FUNNEL with output from FUNNELsim or a data frame with $unitdata and $p0 and $conflev
+  #Supply plot.FUNNEL with output from FUNNELsim or a data frame with $unitdata and $p0 and $predlim
   if(percentage == TRUE){
     x$plotdata[, c("lower", "upper")] <- x$plotdata[, c("lower", "upper")] * 100
     x$data$p <- x$data$p * 100
@@ -88,31 +93,53 @@ plot.funnelplot <- function(x, percentage = TRUE, ...){
     miny <- max(0, min(x$data$p) - 0.1*max(x$data$p))
   }
 
-  #Determine the number of required colours
-  numcolours <- length(x$conflev) + 1
-  cols <- palette.colors(n = numcolours)
+
+  #X-axis for ribbons
+  plotseq <- seq(max(1, min(x$data$numtotal)-10), max(x$data$numtotal) +10, by = 1)
+
+  #Determine the number of required colours for the points!
+  numcolours <- length(x$predlim) + 1
+  #Gradient from green to red displaying detection levels
+  cols <- grDevices::colorRampPalette(c("green", "red"))(numcolours)
   #Determine which colour to use for point:
-  cols_columns <- ncol(x$data) - 5
+  names(cols) = c("in-control", sort(as.numeric(x$predlim)))
+  #Create color scale for ggplot
+  colScale <- scale_colour_manual(name = "Detection", values = cols)
+
+  #Now we create a colScale for the fill of the prediction intervals.
+  colsfill <- sapply(seq(0.5, 0.1, length.out = numcolours-1), function(x) adjustcolor(col_fill, alpha.f = x))
+  names(colsfill) = c(sort(as.numeric(x$predlim)))
+  colScaleFill <- scale_fill_manual(name = "Prediction interval", values = colsfill)
+
+  #Determine highest detection level.
   finalcols <- rep("in-control", length = nrow(x$data))
-  for (k in rev(1:cols_columns)){
+  for (k in rev(1:(numcolours-1))){
     t_col_data <- x$data[,ncol(x$data) - (k-1)]
-    finalcols[which(t_col_data == "worse" | t_col_data == "better")] <- rev(x$conflev)[k]
+    finalcols[which(t_col_data == "worse" | t_col_data == "better")] <- rev(x$predlim)[k]
   }
+  finalcols <- as.factor(finalcols)
+  finalcols <- stats::relevel(finalcols, "in-control")
   x$data$detection <- finalcols
-  t <- ggplot() + geom_line(data = x$plotdata, mapping= aes(x = numtotal, y = lower, group = as.factor(conflev)),
-                            colour = "blue", linetype = "dashed") +
-  geom_line(data = x$plotdata,aes(x = numtotal, y = upper, group = as.factor(conflev)),
-            colour = "blue", linetype = "dashed") +
-  geom_point(data = x$data, mapping= aes(x = numtotal, y = p, colour = detection, group = unit)) +
+  t <- ggplot(x$data, mapping = aes(x = numtotal, y = p)) +
+    #Old code: lines used to display prediction intervals.
+  #geom_line(data = x$plotdata, mapping= aes(x = numtotal, y = lower, group = as.factor(predlim)),
+  #                          colour = "blue", linetype = "dashed") +
+  #geom_line(data = x$plotdata, aes(x = numtotal, y = upper, group = as.factor(predlim)),
+  #          colour = "blue", linetype = "dashed") +
+  geom_ribbon(data = x$plotdata, aes(x = numtotal, ymin = lower, ymax = upper, group = as.factor(predlim), fill = as.factor(predlim)), outline.type = "both") +
+  colScaleFill +
+  geom_point(data = x$data, mapping= aes(x = numtotal, y = p, colour = as.factor(detection), group = unit)) +
     #theme(legend.position = "none") +
-    geom_hline(yintercept = x$p0, colour = "grey") + ylim(miny, maxy)
+    geom_hline(yintercept = x$p0, colour = "grey") + ylim(miny, maxy) + colScale
+  if(isTRUE(unit_label)){
+    t <- t + geom_label_repel(aes(color = factor(detection), label = ifelse(detection!="in-control", unit, "")), size = label_size, show.legend = FALSE)
+  }
   t <- t + labs(x = "Number of outcomes", y = paste0("(Risk-adjusted) Proportion of failure (%)"))
   return(t)
 }
 
 
 #' @describeIn plot Plot a Bernoulli CUSUM
-#' @import ggplot2
 #' @export
 plot.bercusum <- function(x, h = x$h, ...){
   time <- value <- val_up <- val_down <- NULL

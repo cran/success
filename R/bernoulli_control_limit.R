@@ -90,12 +90,41 @@ bernoulli_control_limit <- function(time, alpha = 0.05, followup, psi,
   #2. Construct the CGR-CUSUM chart for each hospital until timepoint time
   #3. Determine control limit h such that at most proportion alpha of the
   #   instances will produce a signal.
-
+  unit <- NULL
   set.seed(seed)
   if(!missing(assist)){
     list2env(assist, envir = environment())
   }
   call = match.call()
+
+  #Time must be positive and numeric
+  if(!all(is.numeric(time), length(time) == 1, time > 0)){
+    stop("Argument time must be a single positive numeric value.")
+  }
+
+  #alpha must be between 0 and 1
+  if(!all(is.numeric(alpha), length(alpha) == 1, alpha > 0, alpha < 1)){
+    stop("Argument alpha must be a single numeric value between 0 and 1.")
+  }
+
+  #Check that followup is a numeric value greater than 0
+  if(!all(is.numeric(followup), length(followup) == 1, followup > 0)){
+    stop("Argument followup must be a single numeric value larger than 0.")
+  }
+
+  #Check that psi is a numeric value greater than 0
+  if(!all(is.numeric(psi), length(psi) == 1, psi > 0)){
+    stop("Argument psi must be a single numeric value larger than 0.")
+  }
+
+  #Check that n_sim is a numeric value greater than 0
+  if(!all(n_sim%%1 == 0, length(n_sim) == 1, n_sim > 0)){
+    stop("Argument n_sim must be a single integer value larger than 0.")
+  }
+
+  if(time <= followup){
+    stop("Argument followup must be greater than time, otherwise no events will be observed.")
+  }
 
   #First we generate the n_sim unit data
   if(pb) { message("Step 1/3: Generating in-control data.")}

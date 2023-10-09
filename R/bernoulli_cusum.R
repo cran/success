@@ -47,7 +47,9 @@
 #' @details The Bernoulli CUSUM chart is given by
 #' \deqn{S_n = \max(0, S_{n-1} + W_n),}{S_n = max(0, S_{n-1} + W_n),} where
 #' \deqn{W_n = X_n \ln \left( \frac{p_1 (1-p_0)}{p_0(1-p_1)}  \right) + \ln \left( \frac{1-p_1}{1-p_0} \right)}{W_n = X_n ln((p_1 * (1-p_0))/(p_0 * (1-p_1))) + ln((1-p_1)/(1-p_0))}
-#' and \eqn{X_n}{X_n} is the outcome of the \eqn{n}{n}-th (chronological) subject in the data.
+#' and \eqn{X_n}{X_n} is the outcome of the \eqn{n}{n}-th (chronological) subject in the data. In terms of the Odds Ratio:
+#' \deqn{W_n = X_n \ln \left( e^\theta  \right) + \ln \left( \frac{1}{1-p_0 + e^\theta p_0} \right)}{W_n = X_n ln(exp(theta)) + ln((1)/(1-p_0 - exp(theta) * p_0))}
+#' For a risk-adjusted procedure (when \code{glmmod} is specified), a patient specific baseline failure probability \eqn{p_{0i}}{p_(0i)} is modelled using logistic regression first.
 #' Instead of the standard practice of displaying patient numbering on the
 #' x-axis, the time of outcome is displayed.
 #'
@@ -121,6 +123,10 @@ bernoulli_cusum <- function(data, followup, glmmod, theta, p0, p1, h, stoptime,
     data <- check_data(data)
   }
 
+  #Check that followup is a numeric value greater than 0
+  if(!all(is.numeric(followup), length(followup) == 1, followup > 0)){
+    stop("Argument followup must be a single numeric value larger than 0.")
+  }
 
 
   if(!missing(stoptime)){
@@ -151,6 +157,28 @@ Returning trivial chart.")
   } else{
     min_entrytime <- min(data$entrytime)
   }
+
+  #Order the data by subject entry time
+  data <- data[order(data$entrytime),]
+  #Determine whether patient had failure. Censored observations do
+  #not count as failures
+  data$outcome <- as.integer((data$survtime <= followup) & (data$censorid == 1))
+  data$otime <- data$entrytime + followup
+  j <- 1
+  numobs <- 0
+  if(!missing(p1)){
+    if(missing(p0) & missing(theta)){
+      stop("Please also provide a value for p0 or theta.")
+    } else if(missing(p0) & !missing(theta)){
+      p0 <- p1/(exp(theta) - exp(theta)*p1 + p1)
+    }
+    theta <- log((p1*(1-p0))/(p0*(1-p1)))
+
+  }
+  if(isTRUE(twosided)){
+    theta = abs(theta)
+  }
+
   #If twosided chart is required, determine the chart in two directions
   if(isTRUE(twosided)){
     Gt <- data.frame(time = c(min_entrytime), val_up = c(0), val_down = c(0), numobs = c(0))
@@ -181,27 +209,7 @@ Returning trivial chart.")
       }
     }
   }
-  #Order the data by subject entry time
-  data <- data[order(data$entrytime),]
-  #Determine whether patient had failure. Censored observations do
-  #not count as failures
-  data$outcome <- as.integer((data$survtime <= followup) & (data$censorid == 1))
-  data$otime <- data$entrytime + followup
-  j <- 1
-  numobs <- 0
-  if(!missing(p1)){
-    if(missing(p0) & missing(theta)){
-      stop("Please also provide a value for p0 or theta.")
-    }
-    if(missing(p0) & !missing(theta)){
-      p0 <- p1/(exp(theta) - exp(theta)*p1 + p1)
-    }
-    theta <- log((p1*(1-p0))/(p0*(1-p1)))
 
-  }
-  if(isTRUE(twosided)){
-    theta = abs(theta)
-  }
 
 
   #pre-calculate risk-adjustment
